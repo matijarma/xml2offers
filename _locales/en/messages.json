@@ -12,16 +12,16 @@
     "message": "Storage"
   },
   "extensionName": {
-    "message": "Izrada ponuda"
+    "message": "Offers app"
   },
   "extensionDescription": {
     "message": "Create professional PDF offers locally with issuer profiles, line items, VAT totals, preview, and download."
   },
   "pageTitle": {
-    "message": "Izrada ponuda"
+    "message": "Offers app"
   },
   "appTitle": {
-    "message": "Izrada ponuda"
+    "message": "Offers app"
   },
   "appSubtitle": {
     "message": "Professional offer generator, fully local in your browser"
