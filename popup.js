@@ -7,7 +7,6 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 const DEFAULT_SETTINGS = {
-    displayMode: 'sidepanel',
     themeMode: 'auto',
     uiLanguage: 'hr',
     pdfLanguage: 'hr',
@@ -19,8 +18,6 @@ const DEFAULT_SETTINGS = {
 const elements = {
     settingsToggle: null,
     settingsPanel: null,
-    displayModeRow: null,
-    displayModeToggle: null,
     themeModeToggle: null,
     uiLanguageToggle: null,
     pdfLanguageToggle: null,
@@ -36,7 +33,6 @@ const elements = {
 const state = {
     settings: { ...DEFAULT_SETTINGS },
     uiMessages: {},
-    displayModeSupported: !!chrome.sidePanel,
     prefersDarkQuery: window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null
 };
 
@@ -47,15 +43,12 @@ async function init() {
     bindEvents();
     applyI18n();
     initTheme();
-    await initDisplayMode();
     updateSettingsUI();
 }
 
 function cacheElements() {
     elements.settingsToggle = getById('settings-toggle');
     elements.settingsPanel = getById('settings-panel');
-    elements.displayModeRow = getById('display-mode-row');
-    elements.displayModeToggle = getById('display-mode-toggle');
     elements.themeModeToggle = getById('theme-mode-toggle');
     elements.uiLanguageToggle = getById('ui-language-toggle');
     elements.pdfLanguageToggle = getById('pdf-language-toggle');
@@ -74,7 +67,6 @@ function getById(id) {
 
 async function loadSettings() {
     const result = await chrome.storage.local.get([
-        'displayMode',
         'themeMode',
         'uiLanguage',
         'pdfLanguage',
@@ -85,7 +77,6 @@ async function loadSettings() {
 
     const legacyTheme = localStorage.getItem('theme');
 
-    state.settings.displayMode = result.displayMode || DEFAULT_SETTINGS.displayMode;
     state.settings.themeMode = result.themeMode || legacyTheme || DEFAULT_SETTINGS.themeMode;
     state.settings.uiLanguage = normalizeLanguage(result.uiLanguage || DEFAULT_SETTINGS.uiLanguage);
     state.settings.pdfLanguage = normalizeLanguage(result.pdfLanguage || state.settings.uiLanguage || DEFAULT_SETTINGS.pdfLanguage);
@@ -105,9 +96,6 @@ function bindEvents() {
         elements.settingsToggle.addEventListener('click', toggleSettingsPanel);
     }
 
-    if (elements.displayModeToggle) {
-        elements.displayModeToggle.addEventListener('click', toggleDisplayMode);
-    }
     if (elements.themeModeToggle) {
         elements.themeModeToggle.addEventListener('click', toggleThemeMode);
     }
@@ -217,22 +205,6 @@ function toggleSettingsPanel() {
 }
 
 function updateSettingsUI() {
-    if (elements.displayModeRow) {
-        if (!state.displayModeSupported) {
-            elements.displayModeRow.style.display = 'none';
-            state.settings.displayMode = 'popup';
-        } else {
-            elements.displayModeRow.style.display = 'flex';
-        }
-    }
-
-    if (elements.displayModeToggle) {
-        const displayLabel = state.settings.displayMode === 'sidepanel'
-            ? uiI18n('displayModeSidepanel')
-            : uiI18n('displayModePopup');
-        elements.displayModeToggle.textContent = displayLabel;
-    }
-
     if (elements.themeModeToggle) {
         const themeLabelKey = state.settings.themeMode === 'dark'
             ? 'themeDark'
@@ -257,7 +229,8 @@ function updateSettingsUI() {
     }
 
     if (elements.retentionRange) {
-        elements.retentionRange.value = String(state.settings.pdfRetentionDays);
+        const stored = clampRetention(state.settings.pdfRetentionDays);
+        elements.retentionRange.value = stored === RETENTION_FOREVER ? '17' : String(stored);
     }
     updateRetentionValue();
 
@@ -271,6 +244,10 @@ function updateRetentionValue() {
     if (!elements.retentionValue) return;
 
     const days = clampRetention(state.settings.pdfRetentionDays);
+    if (days === RETENTION_FOREVER) {
+        elements.retentionValue.textContent = uiI18n('retentionForever') || 'Zauvijek';
+        return;
+    }
     if (days === 0) {
         elements.retentionValue.textContent = uiI18n('retentionImmediate') || '0 (cleared on close)';
         return;
@@ -304,66 +281,6 @@ function updateLogoUI() {
     img.alt = uiI18n('settingPdfLogo') || 'Logo';
     img.src = state.settings.pdfLogoDataUrl;
     elements.pdfLogoPreview.appendChild(img);
-}
-
-async function initDisplayMode() {
-    if (!state.displayModeSupported) {
-        state.settings.displayMode = 'popup';
-        await chrome.storage.local.set({ displayMode: 'popup' });
-        return;
-    }
-
-    const result = await chrome.storage.local.get(['displayMode']);
-    state.settings.displayMode = result.displayMode || DEFAULT_SETTINGS.displayMode;
-}
-
-async function toggleDisplayMode() {
-    if (!state.displayModeSupported) return;
-
-    state.settings.displayMode = state.settings.displayMode === 'sidepanel' ? 'popup' : 'sidepanel';
-    updateSettingsUI();
-    await chrome.storage.local.set({ displayMode: state.settings.displayMode });
-
-    const tabId = await getActiveTabId();
-
-    if (state.settings.displayMode === 'sidepanel' && tabId) {
-        try {
-            if (chrome.sidePanel.setOptions) {
-                await chrome.sidePanel.setOptions({ path: 'popup.html', enabled: true });
-                await chrome.sidePanel.setOptions({ path: 'popup.html', enabled: true, tabId });
-            }
-            await chrome.sidePanel.open({ tabId });
-        } catch (error) {
-            console.error('Failed to open side panel from popup:', error);
-        }
-    }
-
-    chrome.runtime.sendMessage(
-        {
-            action: 'setDisplayMode',
-            mode: state.settings.displayMode,
-            tabId,
-            openPopup: state.settings.displayMode === 'popup',
-            skipOpen: state.settings.displayMode === 'sidepanel'
-        },
-        () => {
-            if (chrome.runtime.lastError) {
-                // no-op
-            }
-        }
-    );
-
-    if (state.settings.displayMode === 'sidepanel') {
-        window.close();
-    }
-}
-
-async function getActiveTabId() {
-    return new Promise((resolve) => {
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            resolve(tabs && tabs[0] ? tabs[0].id : null);
-        });
-    });
 }
 
 async function toggleThemeMode() {
@@ -410,11 +327,14 @@ function handleSystemThemeChange() {
     }
 }
 
+const RETENTION_FOREVER = -1;
+const RETENTION_MAX_DAYS = 16;
+
 function clampRetention(value) {
     if (!Number.isFinite(value)) return DEFAULT_SETTINGS.pdfRetentionDays;
-    if (value < 0) return 0;
-    if (value > 32) return 32;
-    return value;
+    if (value < 0) return RETENTION_FOREVER;
+    if (value > RETENTION_MAX_DAYS) return RETENTION_FOREVER;
+    return Math.floor(value);
 }
 
 function normalizeLanguage(language) {

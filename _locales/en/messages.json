@@ -65,6 +65,9 @@
   "retentionImmediate": {
     "message": "0 (cleared on close)"
   },
+  "retentionForever": {
+    "message": "Forever"
+  },
   "settingPdfColor": {
     "message": "Color"
   },
@@ -613,6 +616,27 @@
   },
   "offerGeneratedSuccess": {
     "message": "Offer generated."
+  },
+  "offerUpdatePdf": {
+    "message": "Update offer"
+  },
+  "offerUpdating": {
+    "message": "Updating..."
+  },
+  "offerUpdatedSuccess": {
+    "message": "Offer updated."
+  },
+  "offerCancelEdit": {
+    "message": "Cancel edit"
+  },
+  "offerEditItem": {
+    "message": "Edit offer"
+  },
+  "offerExportJson": {
+    "message": "Export JSON"
+  },
+  "offerEditStarted": {
+    "message": "Editing offer — change fields and click Update."
   },
   "saving": {
     "message": "Saving..."

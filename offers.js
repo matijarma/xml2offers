@@ -53,7 +53,9 @@ async function initOffersModule() {
         validUntilManuallySet: false,
         issuerEditorMode: 'create',
         issuerCreateMode: 'import',
-        editingIssuerId: ''
+        editingIssuerId: '',
+        editingOfferId: '',
+        editingSnapshot: ''
     };
 
     const elements = {
@@ -147,6 +149,7 @@ async function initOffersModule() {
     initModals();
     bindEvents();
     initCollapsibleSections();
+    initTextareaAutofit();
     applyConfigInputs();
     renderIssuers();
     initFormDefaults();
@@ -193,7 +196,7 @@ async function initOffersModule() {
         state.pdfLanguage = normalizeLanguage(result[STORAGE_KEYS.pdfLanguage] || state.uiLanguage || 'hr');
         state.pdfAccentColor = String(result[STORAGE_KEYS.pdfAccentColor] || '#2c3e50');
         state.pdfLogoDataUrl = String(result[STORAGE_KEYS.pdfLogoDataUrl] || '');
-        state.pdfRetentionDays = clampInt(result.pdfRetentionDays, 0, 32, 8);
+        state.pdfRetentionDays = normalizeRetentionDays(result.pdfRetentionDays);
 
         state.config = normalizeConfig(result[STORAGE_KEYS.config], result);
         state.offerNumberCounters = normalizeCounters(result[STORAGE_KEYS.counters]);
@@ -406,6 +409,15 @@ async function initOffersModule() {
             await generateOffer();
         });
 
+        const offersViewEl = document.getElementById('offers-view');
+        if (offersViewEl) {
+            const onFormChange = () => {
+                if (state.editingOfferId) refreshOfferActionButtons();
+            };
+            offersViewEl.addEventListener('input', onFormChange);
+            offersViewEl.addEventListener('change', onFormChange);
+        }
+
         window.AppShared.ConfirmInline.attach(elements.resetBtn, {
             confirmLabel: i18n('confirmActionRepeat'),
             onConfirm: () => resetOfferForm()
@@ -464,7 +476,7 @@ async function initOffersModule() {
             }
 
             if (changes.pdfRetentionDays) {
-                state.pdfRetentionDays = clampInt(changes.pdfRetentionDays.newValue, 0, 32, 8);
+                state.pdfRetentionDays = normalizeRetentionDays(changes.pdfRetentionDays.newValue);
                 const retained = filterGeneratedOffersByRetention(state.generatedOffers);
                 if (retained.length !== state.generatedOffers.length) {
                     const retainedIds = new Set(retained.map((offer) => offer.id));
@@ -517,6 +529,30 @@ async function initOffersModule() {
             });
         });
         syncCollapsibleHeaders();
+    }
+
+    function autoFitTextarea(textarea) {
+        if (!textarea) return;
+        const prev = textarea.style.height;
+        textarea.style.height = 'auto';
+        const fit = textarea.scrollHeight + 2;
+        const currentMin = parseFloat(getComputedStyle(textarea).minHeight) || 0;
+        const target = Math.max(fit, currentMin);
+        textarea.style.height = `${target}px`;
+        if (textarea.style.height === prev) {
+            textarea.style.height = `${target + 1}px`;
+        }
+    }
+
+    function initTextareaAutofit() {
+        document.querySelectorAll('.textarea-autofit').forEach((btn) => {
+            btn.addEventListener('click', (event) => {
+                event.preventDefault();
+                const targetId = btn.getAttribute('data-autofit-target');
+                if (!targetId) return;
+                autoFitTextarea(document.getElementById(targetId));
+            });
+        });
     }
 
     function syncCollapsibleHeaders() {
@@ -607,6 +643,7 @@ async function initOffersModule() {
         setIssuerCard(elements.selectedIssuerPill, getSelectedIssuer());
         setIssuerSummaryCard(elements.formIssuerCard, getSelectedIssuer());
         updateSectionExcerpts();
+        if (state.editingOfferId) refreshOfferActionButtons();
     }
 
     function renderIssuerChips() {
@@ -1215,6 +1252,7 @@ async function initOffersModule() {
         elements.netBaseValue.textContent = formatCurrency(totals.netBase);
         elements.vatAmountValue.textContent = formatCurrency(totals.vatAmount);
         elements.totalAmountValue.textContent = formatCurrency(totals.total);
+        if (state.editingOfferId) refreshOfferActionButtons();
     }
 
     function validateOfferForm() {
@@ -1312,13 +1350,13 @@ async function initOffersModule() {
             accentColor: state.pdfAccentColor,
             logoDataUrl: state.pdfLogoDataUrl
         };
-        const result = window.OfferPdfGenerator.createOfferPdf(offerData, {
+        const result = await window.OfferPdfGenerator.createOfferPdf(offerData, {
             messages: pdfMessages,
             accentColor: pdfOptions.accentColor,
             logoDataUrl: pdfOptions.logoDataUrl,
             locale: toLocale(pdfLanguage)
         });
-        const blob = result.doc.output('blob');
+        const blob = result.blob;
 
         const offerId = buildId('offer');
         const safeCustomer = sanitizeFilePart(offerData.customer.name || 'buyer');
@@ -1366,13 +1404,26 @@ async function initOffersModule() {
             return;
         }
 
-        const busyLabel = i18n('offerGenerating') || 'Generating...';
+        const editingId = state.editingOfferId;
+        const busyLabel = editingId
+            ? (i18n('offerUpdating') || 'Ažuriranje...')
+            : (i18n('offerGenerating') || 'Generating...');
         try {
             await window.AppShared.withBusy(elements.generateBtn, busyLabel, async () => {
                 const offerData = await buildOfferData(items);
+                if (editingId) {
+                    if (state.offerBlobs[editingId]) delete state.offerBlobs[editingId];
+                    state.generatedOffers = state.generatedOffers.filter((entry) => entry.id !== editingId);
+                }
                 await renderAndPersistOffer(offerData);
             });
-            showToast(i18n('offerGeneratedSuccess') || 'Ponuda je generirana.', { variant: 'success' });
+            if (editingId) exitEditMode();
+            showToast(
+                editingId
+                    ? (i18n('offerUpdatedSuccess') || 'Ponuda je ažurirana.')
+                    : (i18n('offerGeneratedSuccess') || 'Ponuda je generirana.'),
+                { variant: 'success' }
+            );
         } catch (error) {
             console.error('Offer PDF generation failed:', error);
             showToast(i18n('offerErrorGenerationFailed') || 'Failed to generate offer PDF.', { variant: 'error' });
@@ -1380,6 +1431,7 @@ async function initOffersModule() {
     }
 
     function resetOfferForm() {
+        exitEditMode();
         elements.offerNumberInput.value = '';
         elements.issueDateInput.value = formatDateInputValue(new Date());
         state.validUntilManuallySet = false;
@@ -1395,11 +1447,161 @@ async function initOffersModule() {
         elements.specificationInput.value = '';
         elements.noteInput.value = state.config.defaultNote || '';
         elements.vatInput.value = String(state.config.defaultVatRate);
+        elements.introInput.style.height = '';
+        elements.specificationInput.style.height = '';
+        elements.noteInput.style.height = '';
 
         elements.itemsBody.innerHTML = '';
         addItemRow();
         updateOfferNumberSuggestion(false);
         updateSummary();
+    }
+
+    function snapshotItemRow(row) {
+        const inputs = row.querySelectorAll('input');
+        if (!inputs.length) return '';
+        return [
+            inputs[0] ? inputs[0].value : '',
+            inputs[1] ? inputs[1].value : '',
+            inputs[2] ? inputs[2].value : '',
+            inputs[3] ? inputs[3].value : '',
+            inputs[4] ? inputs[4].value : ''
+        ].join('|');
+    }
+
+    function getCurrentFormSnapshot() {
+        return JSON.stringify({
+            offerNumber: normalizeString(elements.offerNumberInput.value).toUpperCase(),
+            issueDate: normalizeString(elements.issueDateInput.value),
+            validUntil: normalizeString(elements.validUntilInput.value),
+            customerName: normalizeString(elements.customerNameInput.value),
+            customerOib: normalizeString(elements.customerOibInput.value),
+            customerAddress: normalizeString(elements.customerAddressInput.value),
+            intro: normalizeString(elements.introInput.value),
+            specification: normalizeString(elements.specificationInput.value),
+            note: normalizeString(elements.noteInput.value),
+            vatRate: String(clampInt(elements.vatInput.value, 0, 25, state.config.defaultVatRate)),
+            issuerId: state.selectedIssuerId,
+            items: Array.from(elements.itemsBody.querySelectorAll('tr')).map(snapshotItemRow).join(';')
+        });
+    }
+
+    function refreshOfferActionButtons() {
+        const editing = !!state.editingOfferId;
+        const genLabel = elements.generateBtn.querySelector('[data-i18n]');
+        const resetLabel = elements.resetBtn.querySelector('[data-i18n]');
+        if (editing) {
+            elements.generateBtn.dataset.mode = 'update';
+            elements.resetBtn.dataset.mode = 'cancel';
+            if (genLabel) genLabel.textContent = i18n('offerUpdatePdf') || 'Ažuriraj ponudu';
+            if (resetLabel) resetLabel.textContent = i18n('offerCancelEdit') || 'Odustani od izmjene';
+            const changed = getCurrentFormSnapshot() !== state.editingSnapshot;
+            elements.generateBtn.disabled = !changed;
+        } else {
+            delete elements.generateBtn.dataset.mode;
+            delete elements.resetBtn.dataset.mode;
+            if (genLabel) genLabel.textContent = i18n('offerGeneratePdf') || 'Generiraj PDF ponude';
+            if (resetLabel) resetLabel.textContent = i18n('offerResetForm') || 'Resetiraj formu';
+            elements.generateBtn.disabled = false;
+        }
+    }
+
+    function ensureIssuerForEdit(issuerData) {
+        if (!issuerData || typeof issuerData !== 'object') return '';
+        const matchByOib = state.entities.find((entry) => {
+            const a = normalizeIdentityValue(entry.oib);
+            const b = normalizeIdentityValue(issuerData.oib);
+            return a && b && a === b;
+        });
+        if (matchByOib) return matchByOib.id;
+        const matchByNameAddress = state.entities.find((entry) => {
+            const aName = normalizeIdentityValue(entry.name);
+            const bName = normalizeIdentityValue(issuerData.name);
+            const aAddr = normalizeIdentityValue(entry.address);
+            const bAddr = normalizeIdentityValue(issuerData.address);
+            return aName && bName && aName === bName && aAddr === bAddr;
+        });
+        if (matchByNameAddress) return matchByNameAddress.id;
+        return upsertIssuer(issuerData);
+    }
+
+    function populateFormFromOffer(offer) {
+        const d = offer.offerData || {};
+        const customer = d.customer || {};
+
+        elements.offerNumberInput.value = d.offerNumber || '';
+        elements.issueDateInput.value = d.issueDate || formatDateInputValue(new Date());
+        elements.validUntilInput.value = d.validUntil || elements.issueDateInput.value;
+        state.validUntilManuallySet = true;
+
+        elements.customerNameInput.value = customer.name || '';
+        elements.customerOibInput.value = customer.oib || '';
+        elements.customerAddressInput.value = customer.address || '';
+        closeBuyerSuggestions(elements.buyerNameSuggestions);
+        closeBuyerSuggestions(elements.buyerOibSuggestions);
+
+        elements.introInput.value = d.intro || '';
+        elements.specificationInput.value = d.specification || '';
+        elements.noteInput.value = d.note || '';
+        elements.vatInput.value = String(clampInt(d.vatRate, 0, 25, state.config.defaultVatRate));
+
+        window.requestAnimationFrame(() => {
+            autoFitTextarea(elements.introInput);
+            autoFitTextarea(elements.specificationInput);
+            autoFitTextarea(elements.noteInput);
+        });
+
+        elements.itemsBody.innerHTML = '';
+        const items = Array.isArray(d.items) ? d.items : [];
+        if (items.length === 0) {
+            addItemRow();
+        } else {
+            items.forEach((item) => addItemRow(item));
+        }
+
+        updateVatRateLabel();
+        updateSummary();
+        updateSectionExcerpts();
+
+        const offersView = document.getElementById('offers-view');
+        if (offersView) window.AppShared.clearAllFieldErrors(offersView);
+    }
+
+    async function beginEditOffer(offer) {
+        if (!offer || !offer.id || !offer.offerData) return;
+        state.editingOfferId = offer.id;
+
+        const issuerId = ensureIssuerForEdit(offer.offerData.issuer);
+        if (issuerId && issuerId !== state.selectedIssuerId) {
+            state.selectedIssuerId = issuerId;
+            await persistEntities();
+            await persistSelectedIssuer();
+        }
+        renderIssuers();
+
+        populateFormFromOffer(offer);
+
+        state.editingSnapshot = getCurrentFormSnapshot();
+        refreshOfferActionButtons();
+
+        const formAnchor = document.getElementById('offer-customer-name') || elements.offerNumberInput;
+        if (formAnchor && typeof formAnchor.scrollIntoView === 'function') {
+            formAnchor.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        if (formAnchor && typeof formAnchor.focus === 'function') {
+            window.setTimeout(() => {
+                try { formAnchor.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
+            }, 350);
+        }
+
+        showToast(i18n('offerEditStarted') || 'Uređivanje ponude — izmijenite polja i kliknite Ažuriraj.', { variant: 'info' });
+    }
+
+    function exitEditMode() {
+        if (!state.editingOfferId) return;
+        state.editingOfferId = '';
+        state.editingSnapshot = '';
+        refreshOfferActionButtons();
     }
 
     function renderGeneratedOffers() {
@@ -1468,6 +1670,31 @@ async function initOffersModule() {
                 await downloadOfferPdf(offer);
             });
 
+            const jsonBtn = document.createElement('button');
+            jsonBtn.type = 'button';
+            jsonBtn.className = 'btn-icon item-json';
+            jsonBtn.title = i18n('offerExportJson') || 'Izvoz JSON';
+            jsonBtn.setAttribute('aria-label', jsonBtn.title);
+            jsonBtn.innerHTML = '<i class="fas fa-file-code" aria-hidden="true"></i>';
+            jsonBtn.addEventListener('click', (event) => {
+                event.stopPropagation();
+                downloadOfferJson(offer);
+            });
+
+            const editBtn = document.createElement('button');
+            editBtn.type = 'button';
+            editBtn.className = 'btn-icon item-edit';
+            editBtn.title = i18n('offerEditItem') || 'Uredi ponudu';
+            editBtn.setAttribute('aria-label', editBtn.title);
+            editBtn.innerHTML = '<i class="fas fa-edit" aria-hidden="true"></i>';
+            if (state.editingOfferId === offer.id) {
+                editBtn.classList.add('is-active');
+            }
+            editBtn.addEventListener('click', async (event) => {
+                event.stopPropagation();
+                await beginEditOffer(offer);
+            });
+
             const removeBtn = document.createElement('button');
             removeBtn.type = 'button';
             removeBtn.className = 'btn-icon btn-icon-danger item-trash';
@@ -1482,6 +1709,8 @@ async function initOffersModule() {
             });
 
             actions.appendChild(pdfBtn);
+            actions.appendChild(jsonBtn);
+            actions.appendChild(editBtn);
             actions.appendChild(removeBtn);
 
             row.appendChild(info);
@@ -1517,13 +1746,13 @@ async function initOffersModule() {
         try {
             const lang = normalizeLanguage(offer.pdfOptions && offer.pdfOptions.language ? offer.pdfOptions.language : state.pdfLanguage);
             const pdfMessages = await getPdfMessages(lang);
-            const result = window.OfferPdfGenerator.createOfferPdf(offer.offerData, {
+            const result = await window.OfferPdfGenerator.createOfferPdf(offer.offerData, {
                 messages: pdfMessages,
                 accentColor: (offer.pdfOptions && offer.pdfOptions.accentColor) || state.pdfAccentColor,
                 logoDataUrl: (offer.pdfOptions && offer.pdfOptions.logoDataUrl) || '',
                 locale: toLocale(lang)
             });
-            const blob = result.doc.output('blob');
+            const blob = result.blob;
             state.offerBlobs[offer.id] = blob;
             return blob;
         } catch (error) {
@@ -1565,6 +1794,94 @@ async function initOffersModule() {
         }
     }
 
+    function buildOfferJsonExport(offerData) {
+        const d = offerData || {};
+        const customer = d.customer || {};
+        const placeholder = '—';
+
+        function nonEmpty(value, fallback) {
+            const s = normalizeString(value);
+            return s || (fallback || placeholder);
+        }
+
+        function isValidDate(value) {
+            return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
+        }
+
+        const today = new Date().toISOString().slice(0, 10);
+        const currencyRaw = String(d.currency || 'EUR').toUpperCase();
+        const currency = /^[A-Z]{3}$/.test(currencyRaw) ? currencyRaw : 'EUR';
+        const taxRate = clampFloat(d.vatRate, 0, 100, 25, 2);
+
+        const specificationLines = (() => {
+            const text = String(d.specification || '').replace(/\r\n/g, '\n').trim();
+            if (!text) return [placeholder];
+            const paragraphs = text.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
+            if (paragraphs.length > 0) return paragraphs;
+            return text.split(/\n+/).map((p) => p.trim()).filter(Boolean);
+        })();
+
+        const items = (Array.isArray(d.items) ? d.items : [])
+            .map((raw) => {
+                const description = nonEmpty(raw && raw.description, placeholder);
+                const quantity = Math.max(0.01, Number(raw && raw.quantity) || 0.01);
+                const unit = nonEmpty(raw && raw.unit, placeholder);
+                const unitPrice = Math.max(0, Number(raw && raw.unitPrice) || 0);
+                const discountPct = Math.min(100, Math.max(0, Number(raw && raw.discountRate) || 0));
+                return {
+                    title: description,
+                    description,
+                    quantity,
+                    unit,
+                    unit_price: unitPrice,
+                    discount_pct: discountPct
+                };
+            });
+
+        if (items.length === 0) {
+            items.push({ title: placeholder, description: placeholder, quantity: 0.01, unit: placeholder, unit_price: 0, discount_pct: 0 });
+        }
+
+        return {
+            offer_number: nonEmpty(d.offerNumber, placeholder),
+            issued_on: isValidDate(d.issueDate) ? d.issueDate : today,
+            valid_until: isValidDate(d.validUntil) ? d.validUntil : (isValidDate(d.issueDate) ? d.issueDate : today),
+            currency,
+            tax_rate: taxRate,
+            client: {
+                name: nonEmpty(customer.name, placeholder),
+                address: nonEmpty(customer.address, placeholder),
+                oib: nonEmpty(customer.oib, placeholder)
+            },
+            intro: nonEmpty(d.intro, placeholder),
+            specification: specificationLines,
+            items,
+            client_memo: nonEmpty(d.note, placeholder),
+            client_meta: [],
+            closing_note: nonEmpty(d.note, placeholder)
+        };
+    }
+
+    function downloadOfferJson(offer) {
+        if (!offer || !offer.offerData) {
+            showToast(i18n('offerErrorBlobMissing') || 'Offer data is unavailable.');
+            return;
+        }
+        const payload = buildOfferJsonExport(offer.offerData);
+        const json = JSON.stringify(payload, null, 2);
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const safeCustomer = sanitizeFilePart(offer.offerData.customer && offer.offerData.customer.name);
+        const safeOfferNumber = sanitizeFilePart(offer.offerData.offerNumber || 'offer');
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `${safeCustomer}-${safeOfferNumber}.json`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+    }
+
     async function downloadOfferPdf(offer) {
         const blob = await ensureOfferBlob(offer);
         if (!blob) {
@@ -1588,6 +1905,9 @@ async function initOffersModule() {
             delete state.offerBlobs[id];
         }
         state.generatedOffers = state.generatedOffers.filter((offer) => offer.id !== id);
+        if (state.editingOfferId === id) {
+            exitEditMode();
+        }
         await persistGeneratedOffers();
         renderGeneratedOffers();
     }
@@ -1997,10 +2317,19 @@ async function initOffersModule() {
             }));
     }
 
+    function normalizeRetentionDays(value) {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return 8;
+        if (n < 0) return -1;
+        if (n > 16) return -1;
+        return Math.floor(n);
+    }
+
     function filterGeneratedOffersByRetention(offers) {
         if (!Array.isArray(offers)) return [];
-        const retentionDays = clampInt(state.pdfRetentionDays, 0, 32, 8);
-        if (retentionDays <= 0) return [];
+        const retentionDays = normalizeRetentionDays(state.pdfRetentionDays);
+        if (retentionDays < 0) return offers;
+        if (retentionDays === 0) return [];
         const cutoff = Date.now() - retentionDays * DAY_MS;
         return offers.filter((offer) => Number(offer.createdAt || 0) >= cutoff);
     }

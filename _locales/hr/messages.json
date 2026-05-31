@@ -65,6 +65,9 @@
   "retentionImmediate": {
     "message": "0 (brise se pri zatvaranju)"
   },
+  "retentionForever": {
+    "message": "Zauvijek"
+  },
   "settingPdfColor": {
     "message": "Boja"
   },
@@ -613,6 +616,27 @@
   },
   "offerGeneratedSuccess": {
     "message": "Ponuda je generirana."
+  },
+  "offerUpdatePdf": {
+    "message": "Ažuriraj ponudu"
+  },
+  "offerUpdating": {
+    "message": "Ažuriranje..."
+  },
+  "offerUpdatedSuccess": {
+    "message": "Ponuda je ažurirana."
+  },
+  "offerCancelEdit": {
+    "message": "Odustani od izmjene"
+  },
+  "offerEditItem": {
+    "message": "Uredi ponudu"
+  },
+  "offerExportJson": {
+    "message": "Izvezi JSON"
+  },
+  "offerEditStarted": {
+    "message": "Uređivanje ponude — izmijenite polja i kliknite Ažuriraj."
   },
   "saving": {
     "message": "Spremanje..."

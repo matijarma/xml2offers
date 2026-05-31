@@ -1,7 +1,10 @@
 'use strict';
 
 (function attachOfferPdfGenerator(globalScope) {
-    const { jsPDF } = globalScope.jspdf || {};
+    const PAGE_WIDTH = 595.28;
+    const PAGE_HEIGHT = 841.89;
+    const COVER_BAND_HEIGHT = 86;
+    const RUNNING_HEADER_HEIGHT = 28;
 
     function asNumber(value, fallback = 0) {
         if (value === null || value === undefined || value === '') return fallback;
@@ -94,6 +97,19 @@
         }
     }
 
+    function formatNumber(value, locale, fractionDigits) {
+        const amount = asNumber(value);
+        const digits = fractionDigits === undefined ? 2 : fractionDigits;
+        try {
+            return new Intl.NumberFormat(locale, {
+                minimumFractionDigits: digits,
+                maximumFractionDigits: digits
+            }).format(amount);
+        } catch (error) {
+            return amount.toFixed(digits);
+        }
+    }
+
     function formatDate(value, locale) {
         if (!value) return '-';
         const date = value instanceof Date ? value : new Date(value);
@@ -128,58 +144,25 @@
         return [44, 62, 80];
     }
 
-    function detectImageFormat(dataUrl) {
-        const normalized = String(dataUrl || '').toLowerCase();
-        if (normalized.startsWith('data:image/png')) return 'PNG';
-        if (normalized.startsWith('data:image/webp')) return 'WEBP';
-        if (normalized.startsWith('data:image/jpeg') || normalized.startsWith('data:image/jpg')) return 'JPEG';
-        return 'PNG';
+    function normalizeHex(hexColor) {
+        const rgb = hexToRgb(hexColor);
+        return '#' + rgb.map((c) => c.toString(16).padStart(2, '0')).join('');
     }
 
-    function resolveMarginLeft(margin) {
-        if (typeof margin === 'number') return margin;
-        if (margin && typeof margin === 'object' && Number.isFinite(margin.left)) return margin.left;
-        return 0;
-    }
-
-    function resolvePaddingRight(padding) {
-        if (typeof padding === 'number') return padding;
-        if (padding && typeof padding === 'object') {
-            if (Number.isFinite(padding.right)) return padding.right;
-            if (Number.isFinite(padding.horizontal)) return padding.horizontal;
-            if (Number.isFinite(padding.left)) return padding.left;
-        }
-        return 0;
-    }
-
-    function resolveLogoPlacement(doc, dataUrl) {
-        if (!doc || !dataUrl) return null;
-
-        const fallback = {
-            width: 28,
-            height: 10,
-            type: detectImageFormat(dataUrl)
+    function relativeLuminance(rgb) {
+        const channel = (v) => {
+            const s = v / 255;
+            return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
         };
+        return 0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2]);
+    }
 
-        try {
-            const properties = doc.getImageProperties(dataUrl);
-            const sourceWidth = Number(properties && properties.width);
-            const sourceHeight = Number(properties && properties.height);
-            if (!Number.isFinite(sourceWidth) || !Number.isFinite(sourceHeight) || sourceWidth <= 0 || sourceHeight <= 0) {
-                return fallback;
-            }
+    function pickOnAccent(accentRgb) {
+        return relativeLuminance(accentRgb) < 0.55 ? '#ffffff' : '#1f2937';
+    }
 
-            const maxWidth = 28;
-            const maxHeight = 12;
-            const scale = Math.min(maxWidth / sourceWidth, maxHeight / sourceHeight, 1);
-            return {
-                width: roundMoney(sourceWidth * scale),
-                height: roundMoney(sourceHeight * scale),
-                type: fallback.type
-            };
-        } catch (error) {
-            return fallback;
-        }
+    function isImageDataUrl(value) {
+        return typeof value === 'string' && /^data:image\/(png|jpe?g|webp|gif|svg\+xml)/i.test(value);
     }
 
     function createI18n(messages, locale) {
@@ -196,7 +179,8 @@
             offerPdfSpecificationLabel: isEnglish ? 'Specification' : 'Specifikacija',
             offerPdfTableNo: '#',
             offerPdfTableDescription: isEnglish ? 'Description' : 'Opis',
-            offerPdfTableQuantity: isEnglish ? 'Qty' : 'Kol',
+            offerPdfTableQuantity: isEnglish ? 'Qty' : 'Kol.',
+            offerPdfTableUnit: isEnglish ? 'Unit' : 'JM',
             offerPdfTableUnitPrice: isEnglish ? 'Unit price' : 'Jed. cijena',
             offerPdfTableDiscount: isEnglish ? 'Discount' : 'Popust',
             offerPdfTableTotal: isEnglish ? 'Total' : 'Ukupno',
@@ -205,7 +189,8 @@
             offerSummaryNet: isEnglish ? 'Net base' : 'Neto osnovica',
             offerSummaryVat: isEnglish ? 'VAT' : 'PDV',
             offerSummaryTotal: isEnglish ? 'Total to pay' : 'Ukupno za platiti',
-            offerPdfNoteLabel: isEnglish ? 'Note' : 'Napomena'
+            offerPdfNoteLabel: isEnglish ? 'Note' : 'Napomena',
+            offerPdfFooterPage: isEnglish ? 'Page' : 'Stranica'
         };
         return function i18n(key, substitutions) {
             const template = dictionary[key] && dictionary[key].message ? dictionary[key].message : fallbacks[key] || key;
@@ -224,32 +209,538 @@
             .filter(Boolean);
     }
 
-    function drawTextSection(doc, title, text, left, y, width) {
-        if (!text) return y;
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(10);
-        doc.setTextColor(40, 50, 62);
-        doc.text(title, left, y);
-        doc.setFont('helvetica', 'normal');
-        doc.setFontSize(9.5);
-        doc.setTextColor(56, 71, 85);
-        const wrapped = doc.splitTextToSize(String(text), width);
-        doc.text(wrapped, left, y + 4.8);
-        return y + 4.8 + (wrapped.length * 4.2) + 2.5;
+    function splitParagraphs(text) {
+        if (!text) return [];
+        return String(text)
+            .replace(/\r\n/g, '\n')
+            .split(/\n{2,}/)
+            .map((p) => p.trim())
+            .filter(Boolean);
     }
 
-    function createOfferPdf(offerData, options) {
-        if (!jsPDF) {
-            throw new Error('jsPDF is not loaded.');
+    function makeTokens(accentHex, compact) {
+        const accentRgb = hexToRgb(accentHex);
+        const accent = normalizeHex(accentHex);
+        const onAccent = pickOnAccent(accentRgb);
+        return {
+            accent,
+            accentSoft: accent + '15',
+            onAccent,
+            ink: '#1f2937',
+            body: '#38475e',
+            muted: '#6b7785',
+            rule: '#d8dee6',
+            surface: '#f7f9fc',
+            white: '#ffffff',
+            bodyFont: compact ? 9 : 10,
+            bodyLeading: compact ? 1.25 : 1.4,
+            labelFont: 8,
+            sectionGap: compact ? 10 : 16,
+            paragraphGap: compact ? 3 : 5,
+            tableFont: compact ? 8.5 : 9,
+            tablePadV: compact ? 3 : 5,
+            tablePadH: 6,
+            cardPad: compact ? 8 : 11
+        };
+    }
+
+    function buildCoverHeader(data, tokens, opts, i18n, locale, logoDataUrl) {
+        const title = i18n('offerPdfTitle');
+        const offerNumber = data.offerNumber || '-';
+        const issueDate = formatDate(data.issueDate, locale);
+        const validUntil = formatDate(data.validUntil, locale);
+
+        const titleStack = [
+            {
+                text: title,
+                color: tokens.onAccent,
+                fontSize: 28,
+                bold: true,
+                characterSpacing: 1.5,
+                margin: [0, 0, 0, 4]
+            },
+            {
+                canvas: [
+                    { type: 'rect', x: 0, y: 0, w: 36, h: 2, color: tokens.onAccent }
+                ],
+                margin: [0, 0, 0, 0]
+            }
+        ];
+
+        const titleColumn = { stack: titleStack, width: '*' };
+
+        if (logoDataUrl && isImageDataUrl(logoDataUrl)) {
+            try {
+                titleColumn.stack = [
+                    {
+                        columns: [
+                            { image: logoDataUrl, fit: [44, 36], width: 44 },
+                            { stack: titleStack, margin: [10, 0, 0, 0] }
+                        ],
+                        columnGap: 0
+                    }
+                ];
+            } catch (error) {
+                // fall back to text-only title
+            }
         }
-        const data = offerData || {};
-        const opts = options || {};
+
+        const metaLines = [
+            { label: i18n('offerPdfMetaNumber'), value: offerNumber },
+            { label: i18n('offerPdfMetaIssueDate'), value: issueDate },
+            { label: i18n('offerPdfMetaValidUntil'), value: validUntil }
+        ];
+
+        const metaColumn = {
+            width: 200,
+            stack: metaLines.map((line) => ({
+                columns: [
+                    {
+                        text: line.label.toUpperCase(),
+                        color: tokens.onAccent,
+                        opacity: 0.75,
+                        fontSize: 7.5,
+                        characterSpacing: 0.6,
+                        width: 'auto'
+                    },
+                    {
+                        text: line.value,
+                        color: tokens.onAccent,
+                        fontSize: 10,
+                        bold: true,
+                        alignment: 'right',
+                        width: '*'
+                    }
+                ],
+                margin: [0, 0, 0, 3]
+            }))
+        };
+
+        return {
+            margin: [36, 22, 36, 0],
+            columns: [titleColumn, metaColumn],
+            columnGap: 24
+        };
+    }
+
+    function buildRunningHeader(data, tokens, i18n) {
+        const customerName = (data.customer && data.customer.name) ? String(data.customer.name).trim() : '';
+        const offerNumber = data.offerNumber || '';
+        const parts = [
+            i18n('offerPdfTitle'),
+            offerNumber ? `#${offerNumber}` : '',
+            customerName
+        ].filter(Boolean);
+        return {
+            margin: [36, 8, 36, 0],
+            text: parts.join('  ·  '),
+            color: tokens.onAccent,
+            fontSize: 9,
+            characterSpacing: 0.4,
+            bold: true
+        };
+    }
+
+    function buildFooter(data, tokens, i18n) {
+        const issuerName = (data.issuer && data.issuer.name) ? String(data.issuer.name).trim() : '';
+        const issuerOib = (data.issuer && data.issuer.oib) ? `OIB ${String(data.issuer.oib).trim()}` : '';
+        const offerNumber = data.offerNumber || '';
+        const leftText = [issuerName, issuerOib].filter(Boolean).join('  ·  ');
+
+        return function footerFn(currentPage, pageCount) {
+            return {
+                margin: [36, 16, 36, 0],
+                stack: [
+                    {
+                        canvas: [
+                            { type: 'line', x1: 0, y1: 0, x2: PAGE_WIDTH - 72, y2: 0, lineWidth: 0.5, lineColor: tokens.rule }
+                        ]
+                    },
+                    {
+                        columns: [
+                            {
+                                text: leftText || ' ',
+                                color: tokens.muted,
+                                fontSize: 8,
+                                width: '*'
+                            },
+                            {
+                                text: `${i18n('offerPdfFooterPage')} ${currentPage} / ${pageCount}${offerNumber ? '  ·  ' + offerNumber : ''}`,
+                                color: tokens.muted,
+                                fontSize: 8,
+                                alignment: 'right',
+                                width: 'auto'
+                            }
+                        ],
+                        margin: [0, 6, 0, 0]
+                    }
+                ]
+            };
+        };
+    }
+
+    function joinSingleLine(parts) {
+        return parts
+            .map((part) => (part === null || part === undefined ? '' : String(part).replace(/\s*[\r\n]+\s*/g, ' ').trim()))
+            .filter(Boolean)
+            .join(', ');
+    }
+
+    function buildPartiesBlock(data, tokens, i18n) {
+        const issuer = data.issuer || {};
+        const customer = data.customer || {};
+        const issuerAddressLine = joinSingleLine([issuer.address, issuer.city]);
+        const customerAddressLine = joinSingleLine([customer.address]);
+
+        const issuerBody = toLineList([
+            issuer.name,
+            issuerAddressLine,
+            issuer.oib ? `OIB: ${issuer.oib}` : '',
+            issuer.iban ? `IBAN: ${issuer.iban}` : '',
+            issuer.email,
+            issuer.web
+        ]);
+        const customerBody = toLineList([
+            customer.name,
+            customerAddressLine,
+            customer.oib ? `OIB: ${customer.oib}` : ''
+        ]);
+
+        function card(label, lines, accentSide) {
+            return {
+                table: {
+                    widths: ['*'],
+                    body: [[
+                        {
+                            stack: [
+                                {
+                                    text: label.toUpperCase(),
+                                    fontSize: 7.5,
+                                    characterSpacing: 1,
+                                    color: tokens.accent,
+                                    bold: true,
+                                    margin: [0, 0, 0, 6]
+                                },
+                                lines.length === 0
+                                    ? { text: '—', color: tokens.muted, fontSize: tokens.bodyFont }
+                                    : {
+                                        stack: lines.map((ln, i) => ({
+                                            text: ln,
+                                            color: i === 0 ? tokens.ink : tokens.body,
+                                            fontSize: i === 0 ? tokens.bodyFont + 1 : tokens.bodyFont,
+                                            bold: i === 0,
+                                            margin: [0, i === 0 ? 0 : 1, 0, 0]
+                                        }))
+                                    }
+                            ],
+                            border: [false, false, false, false],
+                            fillColor: tokens.surface,
+                            margin: [tokens.cardPad, tokens.cardPad, tokens.cardPad, tokens.cardPad]
+                        }
+                    ]]
+                },
+                layout: {
+                    defaultBorder: false,
+                    paddingLeft: () => 0,
+                    paddingRight: () => 0,
+                    paddingTop: () => 0,
+                    paddingBottom: () => 0
+                },
+                unbreakable: true
+            };
+        }
+
+        const accentStripe = (color) => ({
+            canvas: [{ type: 'rect', x: 0, y: 0, w: 3, h: 60, color: color }],
+            width: 3
+        });
+
+        return {
+            columns: [
+                {
+                    width: '*',
+                    stack: [
+                        { canvas: [{ type: 'rect', x: 0, y: 0, w: 24, h: 2, color: tokens.accent }], margin: [0, 0, 0, 6] },
+                        card(i18n('offerPdfIssuerLabel'), issuerBody, tokens.accent)
+                    ]
+                },
+                {
+                    width: '*',
+                    stack: [
+                        { canvas: [{ type: 'rect', x: 0, y: 0, w: 24, h: 2, color: tokens.accent }], margin: [0, 0, 0, 6] },
+                        card(i18n('offerPdfCustomerLabel'), customerBody, tokens.accent)
+                    ]
+                }
+            ],
+            columnGap: 16,
+            margin: [0, 0, 0, tokens.sectionGap]
+        };
+    }
+
+    function buildTextSection(label, text, tokens) {
+        const paragraphs = splitParagraphs(text);
+        if (paragraphs.length === 0) return null;
+        const labelBlock = {
+            stack: [
+                {
+                    text: label.toUpperCase(),
+                    fontSize: 8,
+                    characterSpacing: 1.2,
+                    color: tokens.accent,
+                    bold: true,
+                    margin: [0, 0, 0, 4]
+                },
+                {
+                    canvas: [{ type: 'rect', x: 0, y: 0, w: 18, h: 1.6, color: tokens.accent }],
+                    margin: [0, 0, 0, 8]
+                }
+            ]
+        };
+        const paragraphBlocks = paragraphs.map((p, i) => ({
+            text: p,
+            color: tokens.body,
+            fontSize: tokens.bodyFont,
+            lineHeight: tokens.bodyLeading,
+            margin: [0, i === 0 ? 0 : tokens.paragraphGap, 0, 0]
+        }));
+
+        const headerStack = {
+            stack: [labelBlock, paragraphBlocks[0]],
+            unbreakable: true
+        };
+        const rest = paragraphBlocks.slice(1);
+        return {
+            stack: [headerStack, ...rest],
+            margin: [0, 0, 0, tokens.sectionGap]
+        };
+    }
+
+    function buildItemsTable(totals, tokens, currency, locale, i18n) {
+        const items = totals.items || [];
+        const hasAnyDiscount = items.some((it) => it.discountRate > 0);
+
+        const headerCells = [
+            { text: i18n('offerPdfTableNo'), alignment: 'center' },
+            { text: i18n('offerPdfTableDescription'), alignment: 'left' },
+            { text: i18n('offerPdfTableQuantity'), alignment: 'right' },
+            { text: i18n('offerPdfTableUnit'), alignment: 'left' },
+            { text: i18n('offerPdfTableUnitPrice'), alignment: 'right' }
+        ];
+        if (hasAnyDiscount) headerCells.push({ text: i18n('offerPdfTableDiscount'), alignment: 'right' });
+        headerCells.push({ text: i18n('offerPdfTableTotal'), alignment: 'right' });
+
+        const headerRow = headerCells.map((cell) => ({
+            text: cell.text,
+            alignment: cell.alignment,
+            color: tokens.onAccent,
+            bold: true,
+            fontSize: tokens.tableFont,
+            characterSpacing: 0.3
+        }));
+
+        const widths = hasAnyDiscount
+            ? [22, '*', 44, 44, 70, 44, 78]
+            : [22, '*', 50, 50, 80, 90];
+
+        const bodyRows = items.map((item, index) => {
+            const row = [
+                { text: String(index + 1), alignment: 'center', color: tokens.muted, fontSize: tokens.tableFont },
+                { text: item.description || '—', alignment: 'left', color: tokens.ink, fontSize: tokens.tableFont },
+                { text: formatNumber(item.quantity, locale, 2), alignment: 'right', color: tokens.ink, fontSize: tokens.tableFont },
+                { text: item.unit || '—', alignment: 'left', color: tokens.body, fontSize: tokens.tableFont },
+                { text: formatCurrency(item.unitPrice, currency, locale), alignment: 'right', color: tokens.ink, fontSize: tokens.tableFont }
+            ];
+            if (hasAnyDiscount) {
+                row.push({
+                    text: item.discountRate > 0 ? `${formatNumber(item.discountRate, locale, item.discountRate % 1 === 0 ? 0 : 2)}%` : '—',
+                    alignment: 'right',
+                    color: item.discountRate > 0 ? tokens.ink : tokens.muted,
+                    fontSize: tokens.tableFont
+                });
+            }
+            row.push({ text: formatCurrency(item.lineTotal, currency, locale), alignment: 'right', color: tokens.ink, bold: true, fontSize: tokens.tableFont });
+            return row;
+        });
+
+        return {
+            table: {
+                headerRows: 1,
+                keepWithHeaderRows: 1,
+                dontBreakRows: true,
+                widths: widths,
+                body: [headerRow, ...bodyRows]
+            },
+            layout: {
+                hLineWidth: (i) => (i === 0 || i === 1 ? 0 : 0.5),
+                vLineWidth: () => 0,
+                hLineColor: () => tokens.rule,
+                fillColor: (rowIndex) => {
+                    if (rowIndex === 0) return tokens.accent;
+                    return rowIndex % 2 === 0 ? tokens.surface : null;
+                },
+                paddingLeft: () => tokens.tablePadH,
+                paddingRight: () => tokens.tablePadH,
+                paddingTop: (i) => (i === 0 ? tokens.tablePadV + 2 : tokens.tablePadV),
+                paddingBottom: (i) => (i === 0 ? tokens.tablePadV + 2 : tokens.tablePadV)
+            },
+            margin: [0, 0, 0, tokens.sectionGap]
+        };
+    }
+
+    function buildSummary(totals, tokens, currency, locale, i18n) {
+        const rows = [
+            { label: i18n('offerSummaryStandard'), value: formatCurrency(totals.standardPrice, currency, locale) },
+            { label: i18n('offerSummaryDiscount'), value: formatCurrency(totals.discountAmount, currency, locale) },
+            { label: i18n('offerSummaryNet'), value: formatCurrency(totals.netBase, currency, locale) },
+            { label: i18n('offerSummaryVat'), value: formatCurrency(totals.vatAmount, currency, locale) }
+        ];
+
+        const summaryRows = rows.map((r) => [
+            { text: r.label, color: tokens.body, fontSize: tokens.bodyFont, margin: [0, 3, 0, 3] },
+            { text: r.value, color: tokens.ink, fontSize: tokens.bodyFont, alignment: 'right', margin: [0, 3, 0, 3] }
+        ]);
+
+        summaryRows.push([
+            {
+                text: i18n('offerSummaryTotal').toUpperCase(),
+                color: tokens.muted,
+                fontSize: 8.5,
+                characterSpacing: 1,
+                bold: true,
+                margin: [0, 8, 0, 6]
+            },
+            {
+                text: formatCurrency(totals.total, currency, locale),
+                color: tokens.accent,
+                fontSize: 16,
+                bold: true,
+                alignment: 'right',
+                margin: [0, 4, 0, 6]
+            }
+        ]);
+
+        return {
+            unbreakable: true,
+            margin: [0, 0, 0, tokens.sectionGap],
+            columns: [
+                { text: '', width: '*' },
+                {
+                    width: 230,
+                    table: {
+                        widths: ['*', 'auto'],
+                        body: summaryRows
+                    },
+                    layout: {
+                        defaultBorder: false,
+                        hLineWidth: (i, node) => (i === node.table.body.length - 1 ? 0.8 : 0),
+                        hLineColor: () => tokens.rule,
+                        vLineWidth: () => 0,
+                        paddingLeft: () => 12,
+                        paddingRight: () => 12,
+                        paddingTop: () => 0,
+                        paddingBottom: () => 0,
+                        fillColor: () => null
+                    }
+                }
+            ]
+        };
+    }
+
+    function buildDocDefinition(data, opts, totals, compact) {
         const locale = opts.locale || 'hr-HR';
         const accentColor = opts.accentColor || '#c10034';
         const logoDataUrl = opts.logoDataUrl || '';
-        const accentRgb = hexToRgb(accentColor);
         const currency = data.currency || 'EUR';
         const i18n = createI18n(opts.messages || {}, locale);
+        const tokens = makeTokens(accentColor, !!compact);
+
+        const topMargin = COVER_BAND_HEIGHT + 18;
+        const topMarginPage2 = RUNNING_HEADER_HEIGHT + 14;
+
+        const partiesBlock = buildPartiesBlock(data, tokens, i18n);
+        const introBlock = buildTextSection(i18n('offerPdfIntroLabel'), data.intro, tokens);
+        const specBlock = buildTextSection(i18n('offerPdfSpecificationLabel'), data.specification, tokens);
+        const tableBlock = buildItemsTable(totals, tokens, currency, locale, i18n);
+        const summaryBlock = buildSummary(totals, tokens, currency, locale, i18n);
+        const noteBlock = buildTextSection(i18n('offerPdfNoteLabel'), data.note, tokens);
+
+        const summaryAndNote = noteBlock
+            ? { stack: [summaryBlock, noteBlock], unbreakable: true }
+            : summaryBlock;
+
+        const content = [partiesBlock];
+        if (introBlock) content.push(introBlock);
+        if (specBlock) content.push(specBlock);
+        content.push(tableBlock);
+        content.push(summaryAndNote);
+
+        const coverHeader = buildCoverHeader(data, tokens, opts, i18n, locale, logoDataUrl);
+        const runningHeader = buildRunningHeader(data, tokens, i18n);
+        const footerFn = buildFooter(data, tokens, i18n);
+
+        return {
+            pageSize: 'A4',
+            pageMargins: [36, topMargin, 36, 56],
+            background: function background(currentPage) {
+                if (currentPage === 1) {
+                    return [
+                        {
+                            canvas: [
+                                { type: 'rect', x: 0, y: 0, w: PAGE_WIDTH, h: COVER_BAND_HEIGHT, color: tokens.accent }
+                            ]
+                        }
+                    ];
+                }
+                return [
+                    {
+                        canvas: [
+                            { type: 'rect', x: 0, y: 0, w: PAGE_WIDTH, h: RUNNING_HEADER_HEIGHT, color: tokens.accent },
+                            { type: 'rect', x: 0, y: RUNNING_HEADER_HEIGHT, w: PAGE_WIDTH, h: 1.5, color: tokens.accent }
+                        ]
+                    }
+                ];
+            },
+            header: function header(currentPage) {
+                if (currentPage === 1) return coverHeader;
+                return runningHeader;
+            },
+            footer: footerFn,
+            content: content,
+            defaultStyle: {
+                font: 'Roboto',
+                fontSize: tokens.bodyFont,
+                color: tokens.body,
+                lineHeight: tokens.bodyLeading
+            }
+        };
+    }
+
+    function renderToBlob(docDef) {
+        return new Promise((resolve, reject) => {
+            try {
+                const pdfMake = globalScope.pdfMake;
+                if (!pdfMake || typeof pdfMake.createPdf !== 'function') {
+                    throw new Error('pdfMake is not loaded.');
+                }
+                let pageCount = 0;
+                const wrapped = Object.assign({}, docDef, {
+                    footer: function wrappedFooter(currentPage, total) {
+                        if (typeof total === 'number') pageCount = Math.max(pageCount, total);
+                        return docDef.footer(currentPage, total);
+                    }
+                });
+                pdfMake.createPdf(wrapped).getBlob((blob) => {
+                    resolve({ blob, pageCount });
+                });
+            } catch (error) {
+                reject(error);
+            }
+        });
+    }
+
+    async function createOfferPdf(offerData, options) {
+        const data = offerData || {};
+        const opts = options || {};
 
         const hasPerItemDiscount = Array.isArray(data.items) && data.items.some((item) =>
             item && item.discountRate !== undefined && item.discountRate !== null && item.discountRate !== ''
@@ -257,210 +748,21 @@
         const totals = hasPerItemDiscount
             ? computeOfferTotals(data.items || [], data.vatRate)
             : computeOfferTotals(data.items || [], data.discountRate, data.vatRate);
-        const doc = new jsPDF({ unit: 'mm', format: 'a4', compress: true });
 
-        const pageWidth = doc.internal.pageSize.getWidth();
-        const pageHeight = doc.internal.pageSize.getHeight();
-        const margin = 14;
-        const contentWidth = pageWidth - margin * 2;
-        const rightColWidth = 70;
-        const leftColWidth = contentWidth - rightColWidth - 6;
+        const passOneDef = buildDocDefinition(data, opts, totals, false);
+        const passOne = await renderToBlob(passOneDef);
 
-        doc.setDrawColor(accentRgb[0], accentRgb[1], accentRgb[2]);
-        doc.setLineWidth(1.2);
-        doc.line(margin, 14, pageWidth - margin, 14);
-
-        doc.setFont('helvetica', 'bold');
-        doc.setTextColor(accentRgb[0], accentRgb[1], accentRgb[2]);
-        doc.setFontSize(18);
-        let titleX = margin;
-        if (logoDataUrl) {
-            try {
-                const logoPlacement = resolveLogoPlacement(doc, logoDataUrl);
-                if (logoPlacement) {
-                    const logoY = 17 + ((12 - logoPlacement.height) / 2);
-                    doc.addImage(logoDataUrl, logoPlacement.type, margin, logoY, logoPlacement.width, logoPlacement.height);
-                    titleX = margin + logoPlacement.width + 6;
-                }
-            } catch (error) {
-                // Ignore invalid logo payload and keep rendering without a logo.
-            }
-        }
-        doc.text(i18n('offerPdfTitle'), titleX, 24);
-
-        const issueDate = formatDate(data.issueDate, locale);
-        const validUntil = formatDate(data.validUntil, locale);
-        const offerNumber = data.offerNumber || '-';
-
-        doc.setFont('helvetica', 'normal');
-        doc.setTextColor(56, 71, 85);
-        doc.setFontSize(9.5);
-        doc.text(`${i18n('offerPdfMetaNumber')}: ${offerNumber}`, pageWidth - margin, 20, { align: 'right' });
-        doc.text(`${i18n('offerPdfMetaIssueDate')}: ${issueDate}`, pageWidth - margin, 25, { align: 'right' });
-        doc.text(`${i18n('offerPdfMetaValidUntil')}: ${validUntil}`, pageWidth - margin, 30, { align: 'right' });
-
-        const issuerLines = toLineList([
-            data.issuer && data.issuer.name,
-            data.issuer && data.issuer.address,
-            data.issuer && data.issuer.city,
-            data.issuer && data.issuer.oib ? `OIB: ${data.issuer.oib}` : '',
-            data.issuer && data.issuer.iban ? `IBAN: ${data.issuer.iban}` : '',
-            data.issuer && data.issuer.contact ? `${data.issuer.contact}` : '',
-            data.issuer && data.issuer.email ? `${data.issuer.email}` : '',
-            data.issuer && data.issuer.web ? `${data.issuer.web}` : ''
-        ]);
-        const customerLines = toLineList([
-            data.customer && data.customer.name,
-            data.customer && data.customer.address,
-            data.customer && data.customer.oib ? `OIB: ${data.customer.oib}` : ''
-        ]);
-
-        let cursorY = 36;
-
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(10);
-        doc.setTextColor(31, 42, 55);
-        doc.text(i18n('offerPdfIssuerLabel'), margin, cursorY);
-        doc.text(i18n('offerPdfCustomerLabel'), margin + leftColWidth + 6, cursorY);
-
-        doc.setFont('helvetica', 'normal');
-        doc.setFontSize(9.5);
-        doc.setTextColor(56, 71, 85);
-
-        const issuerWrapped = doc.splitTextToSize(issuerLines.join('\n') || '-', leftColWidth);
-        const customerWrapped = doc.splitTextToSize(customerLines.join('\n') || '-', rightColWidth);
-        doc.text(issuerWrapped, margin, cursorY + 5);
-        doc.text(customerWrapped, margin + leftColWidth + 6, cursorY + 5);
-        cursorY += Math.max(issuerWrapped.length, customerWrapped.length) * 4.2 + 10;
-
-        cursorY = drawTextSection(
-            doc,
-            i18n('offerPdfIntroLabel'),
-            data.intro || '',
-            margin,
-            cursorY,
-            contentWidth
-        );
-        cursorY = drawTextSection(
-            doc,
-            i18n('offerPdfSpecificationLabel'),
-            data.specification || '',
-            margin,
-            cursorY,
-            contentWidth
-        );
-
-        if (cursorY > pageHeight - 110) {
-            doc.addPage();
-            cursorY = margin + 6;
+        if (passOne.pageCount <= 1) {
+            return { blob: passOne.blob, totals, pageCount: passOne.pageCount };
         }
 
-        const tableBody = totals.items.map((item, index) => ([
-            String(index + 1),
-            item.description || '-',
-            `${item.quantity.toFixed(2)} ${item.unit || ''}`.trim(),
-            formatCurrency(item.unitPrice, currency, locale),
-            `${Math.round(item.discountRate)}%`,
-            formatCurrency(item.lineTotal, currency, locale)
-        ]));
+        const compactDef = buildDocDefinition(data, opts, totals, true);
+        const compactPass = await renderToBlob(compactDef);
 
-        doc.autoTable({
-            startY: cursorY + 2,
-            margin: { left: margin, right: margin },
-            head: [[
-                i18n('offerPdfTableNo'),
-                i18n('offerPdfTableDescription'),
-                i18n('offerPdfTableQuantity'),
-                i18n('offerPdfTableUnitPrice'),
-                i18n('offerPdfTableDiscount'),
-                i18n('offerPdfTableTotal')
-            ]],
-            body: tableBody,
-            headStyles: {
-                fillColor: accentRgb,
-                textColor: [255, 255, 255],
-                fontStyle: 'bold',
-                fontSize: 9
-            },
-            styles: {
-                font: 'helvetica',
-                fontSize: 9,
-                cellPadding: 1.8,
-                textColor: [31, 42, 55],
-                lineColor: [216, 222, 230],
-                lineWidth: 0.1
-            },
-            alternateRowStyles: {
-                fillColor: [247, 249, 252]
-            },
-            columnStyles: {
-                0: { cellWidth: 10, halign: 'center' },
-                1: { cellWidth: 68 },
-                2: { cellWidth: 24, halign: 'right' },
-                3: { cellWidth: 28, halign: 'right' },
-                4: { cellWidth: 20, halign: 'right' },
-                5: { cellWidth: 26, halign: 'right' }
-            }
-        });
-
-        const tableBottom = doc.lastAutoTable && doc.lastAutoTable.finalY ? doc.lastAutoTable.finalY : (cursorY + 10);
-        let summaryY = tableBottom + 7;
-        if (summaryY > pageHeight - 55) {
-            doc.addPage();
-            summaryY = margin + 6;
+        if (compactPass.pageCount < passOne.pageCount) {
+            return { blob: compactPass.blob, totals, pageCount: compactPass.pageCount };
         }
-
-        const summaryWidth = 72;
-        const table = doc.lastAutoTable;
-        let summaryRight = pageWidth - margin;
-        let summaryValueX = summaryRight - 3;
-        if (table && Array.isArray(table.columns) && table.columns.length > 0) {
-            const tableLeft = resolveMarginLeft(table.settings ? table.settings.margin : null);
-            const tableWidth = table.columns.reduce((sum, column) => sum + column.width, 0);
-            summaryRight = tableLeft + tableWidth;
-            const paddingRight = resolvePaddingRight(table.styles ? table.styles.cellPadding : null);
-            summaryValueX = summaryRight - Math.max(2, paddingRight);
-        }
-        summaryRight = Math.min(pageWidth - margin, Math.max(summaryRight, margin + summaryWidth));
-        const summaryX = summaryRight - summaryWidth;
-        summaryValueX = Math.min(summaryRight - 2.5, Math.max(summaryX + 28, summaryValueX));
-
-        const summaryRows = [
-            { label: i18n('offerSummaryStandard'), value: formatCurrency(totals.standardPrice, currency, locale), bold: false },
-            { label: i18n('offerSummaryDiscount'), value: formatCurrency(totals.discountAmount, currency, locale), bold: false },
-            { label: i18n('offerSummaryNet'), value: formatCurrency(totals.netBase, currency, locale), bold: false },
-            { label: i18n('offerSummaryVat'), value: formatCurrency(totals.vatAmount, currency, locale), bold: false },
-            { label: i18n('offerSummaryTotal'), value: formatCurrency(totals.total, currency, locale), bold: true }
-        ];
-
-        doc.setDrawColor(216, 222, 230);
-        doc.setLineWidth(0.2);
-        doc.roundedRect(summaryX, summaryY - 4, summaryWidth, 30, 2, 2);
-
-        let rowY = summaryY;
-        summaryRows.forEach((row, index) => {
-            doc.setFont('helvetica', row.bold ? 'bold' : 'normal');
-            doc.setFontSize(row.bold ? 10.5 : 9.5);
-            doc.setTextColor(row.bold ? accentRgb[0] : 56, row.bold ? accentRgb[1] : 71, row.bold ? accentRgb[2] : 85);
-            doc.text(row.label, summaryX + 3, rowY);
-            doc.text(row.value, summaryValueX, rowY, { align: 'right' });
-            rowY += index === summaryRows.length - 1 ? 0 : 5.3;
-        });
-
-        const noteText = data.note || '';
-        if (noteText) {
-            let noteY = summaryY + 34;
-            if (noteY > pageHeight - 20) {
-                doc.addPage();
-                noteY = margin + 6;
-            }
-            drawTextSection(doc, i18n('offerPdfNoteLabel'), noteText, margin, noteY, contentWidth);
-        }
-
-        return {
-            doc,
-            totals
-        };
+        return { blob: passOne.blob, totals, pageCount: passOne.pageCount };
     }
 
     globalScope.OfferPdfGenerator = {

@@ -499,6 +499,32 @@
         }
         .item-trash i { font-size: 11px; }
 
+        .item-edit i { font-size: 11px; }
+
+        .item-json {
+            width: 26px;
+            height: 26px;
+            font-size: 10px;
+        }
+        .item-json i { font-size: 10px; }
+        .item-json:hover,
+        .item-json:focus-visible {
+            background: #eef2ff;
+            border-color: #6366f1;
+            color: #4338ca;
+        }
+        .item-edit:hover,
+        .item-edit:focus-visible {
+            background: var(--primary-soft, rgba(193, 0, 52, 0.08));
+            border-color: var(--primary, #c10034);
+            color: var(--primary, #c10034);
+        }
+        .item-edit.is-active {
+            background: var(--primary, #c10034);
+            border-color: var(--primary, #c10034);
+            color: #fff;
+        }
+
         .file-meta {
             display: flex;
             flex-direction: column;
@@ -658,6 +684,22 @@
             margin-bottom: 8px;
         }
 
+        .offer-generated-toggle {
+            flex: 1 1 auto;
+            width: auto !important;
+            justify-content: flex-start;
+            padding: 6px 4px;
+        }
+
+        .offer-collapsible#offer-results-section .offer-section-body {
+            border-top: none;
+            padding: 0;
+            margin-top: 4px;
+        }
+        .offer-collapsible#offer-results-section.is-collapsed .offers-generated-head {
+            margin-bottom: 0;
+        }
+
         .offer-parties-section {
             background: transparent;
             border: none;
@@ -728,7 +770,41 @@
 
         .offer-details-text .textarea-input {
             min-height: 48px;
-            max-height: 104px;
+            max-height: none;
+        }
+
+        .textarea-wrap {
+            position: relative;
+            display: block;
+        }
+        .textarea-autofit {
+            position: absolute;
+            top: 4px;
+            right: 4px;
+            width: 22px;
+            height: 22px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            color: var(--text-light);
+            border-radius: 5px;
+            font-size: 10px;
+            cursor: pointer;
+            opacity: 0.45;
+            transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+            padding: 0;
+            z-index: 1;
+        }
+        .textarea-wrap:hover .textarea-autofit,
+        .textarea-autofit:focus-visible {
+            opacity: 1;
+        }
+        .textarea-autofit:hover {
+            color: var(--primary);
+            border-color: var(--primary);
+            opacity: 1;
         }
 
         .settings-link-btn {
@@ -808,22 +884,6 @@
             display: none;
         }
 
-        .offers-header {
-            margin-bottom: 6px;
-        }
-
-        .offers-title {
-            margin: 0;
-            font-size: 14px;
-            font-weight: 700;
-        }
-
-        .offers-subtitle {
-            margin: 2px 0 0;
-            font-size: 11px;
-            color: var(--text-light);
-        }
-
         .offer-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -898,14 +958,43 @@
             border-bottom: none;
         }
 
+        .offer-items-table td {
+            position: relative;
+        }
+
         .offer-items-table .text-input,
         .offer-items-table .number-input {
             padding: 7px 8px;
             font-size: var(--fs-label);
+            transition: min-width 220ms cubic-bezier(0.22, 1, 0.36, 1),
+                        box-shadow 180ms ease,
+                        border-color 180ms ease;
         }
 
         .offer-items-table td.td-num .number-input {
             text-align: right;
+        }
+
+        .offer-items-table .text-input:focus,
+        .offer-items-table .number-input:focus {
+            position: relative;
+            z-index: 12;
+            box-shadow: 0 6px 18px rgba(15, 23, 42, 0.10);
+            background: var(--surface);
+        }
+
+        /* Description column — grow generously */
+        .offer-items-table tbody tr > td:nth-child(1) .text-input:focus {
+            min-width: min(360px, calc(100vw - 60px));
+        }
+
+        /* Qty / Unit / Unit price — grow enough to comfortably read 4-6 chars */
+        .offer-items-table tbody tr > td:nth-child(2) .number-input:focus,
+        .offer-items-table tbody tr > td:nth-child(4) .number-input:focus {
+            min-width: 100px;
+        }
+        .offer-items-table tbody tr > td:nth-child(3) .text-input:focus {
+            min-width: 110px;
         }
 
         .offer-items-table .number-input::-webkit-inner-spin-button,
@@ -1325,6 +1414,20 @@
             color: var(--danger-fg);
         }
 
+        .btn[data-mode="update"] {
+            background: #2563eb;
+            border-color: #2563eb;
+            color: #fff;
+        }
+        .btn[data-mode="update"]:hover:not(:disabled) {
+            background: #1d4ed8;
+            border-color: #1d4ed8;
+        }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
         .is-busy {
             opacity: 0.75;
             cursor: progress !important;
@@ -1669,10 +1772,6 @@
 
     <section id="settings-panel" class="settings-panel" aria-hidden="true">
         <div class="setting-group-title" data-i18n="groupApp"></div>
-        <div class="setting-item" id="display-mode-row">
-            <div class="setting-label" data-i18n="settingDisplayMode"></div>
-            <button type="button" class="toggle-pill" id="display-mode-toggle"></button>
-        </div>
         <div class="setting-item">
             <div class="setting-label" data-i18n="settingTheme"></div>
             <button type="button" class="toggle-pill" id="theme-mode-toggle"></button>
@@ -1710,7 +1809,7 @@
                 <div class="setting-label" data-i18n="settingRetention"></div>
                 <div class="setting-value" id="retention-value"></div>
             </div>
-            <input type="range" id="retention-range" class="range-input" min="0" max="32" step="1">
+            <input type="range" id="retention-range" class="range-input" min="0" max="17" step="1">
         </div>
 
         <div class="setting-group-title" data-i18n="groupOffers"></div>
@@ -1820,18 +1919,16 @@
     <div id="main-content-shell" class="main-content-shell">
     <section id="offers-view">
         <div class="offers-shell">
-            <section class="offers-section offers-generated-sticky is-hidden" id="offer-results-section">
+            <section class="offers-section offers-generated-sticky offer-collapsible is-hidden" id="offer-results-section" data-offer-section="generated">
                 <div class="offers-generated-head">
-                    <div class="section-title" data-i18n="offerGeneratedTitle"></div>
+                    <button type="button" class="offer-section-toggle offer-generated-toggle" data-offer-section-toggle="generated" aria-expanded="true">
+                        <span class="section-title" data-i18n="offerGeneratedTitle"></span>
+                        <i class="fas fa-chevron-down offer-section-chevron" aria-hidden="true"></i>
+                    </button>
                     <button id="offer-clear-generated-btn" class="btn-small" type="button" data-i18n="offerClearGenerated"></button>
                 </div>
-                <div id="offer-results-list" class="file-list"></div>
-            </section>
-
-            <section class="offers-section">
-                <div class="offers-header">
-                    <h3 class="offers-title" data-i18n="offersTitle"></h3>
-                    <p class="offers-subtitle" data-i18n="offersSubtitle"></p>
+                <div class="offer-section-body" data-offer-section-body="generated">
+                    <div id="offer-results-list" class="file-list"></div>
                 </div>
             </section>
 
@@ -1896,15 +1993,30 @@
                     <div class="offer-grid-single offer-details-text">
                         <div class="offer-field">
                             <label for="offer-intro" data-i18n="offerIntroLabel"></label>
-                            <textarea id="offer-intro" class="textarea-input"></textarea>
+                            <div class="textarea-wrap">
+                                <textarea id="offer-intro" class="textarea-input"></textarea>
+                                <button type="button" class="textarea-autofit" data-autofit-target="offer-intro" aria-label="Expand to fit content" title="Expand to fit content">
+                                    <i class="fas fa-arrows-alt-v" aria-hidden="true"></i>
+                                </button>
+                            </div>
                         </div>
                         <div class="offer-field">
                             <label for="offer-specification" data-i18n="offerSpecificationLabel"></label>
-                            <textarea id="offer-specification" class="textarea-input"></textarea>
+                            <div class="textarea-wrap">
+                                <textarea id="offer-specification" class="textarea-input"></textarea>
+                                <button type="button" class="textarea-autofit" data-autofit-target="offer-specification" aria-label="Expand to fit content" title="Expand to fit content">
+                                    <i class="fas fa-arrows-alt-v" aria-hidden="true"></i>
+                                </button>
+                            </div>
                         </div>
                         <div class="offer-field">
                             <label for="offer-note" data-i18n="offerNoteLabel"></label>
-                            <textarea id="offer-note" class="textarea-input"></textarea>
+                            <div class="textarea-wrap">
+                                <textarea id="offer-note" class="textarea-input"></textarea>
+                                <button type="button" class="textarea-autofit" data-autofit-target="offer-note" aria-label="Expand to fit content" title="Expand to fit content">
+                                    <i class="fas fa-arrows-alt-v" aria-hidden="true"></i>
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -2036,8 +2148,8 @@
     </div>
 
     <!-- Libraries -->
-    <script src="./lib/jspdf.umd.min.js"></script>
-    <script src="./lib/jspdf.plugin.autotable.min.js"></script>
+    <script src="./lib/pdfmake.min.js"></script>
+    <script src="./lib/vfs_fonts.js"></script>
 
     <!-- Scripts -->
     <script src="shared.js"></script>
